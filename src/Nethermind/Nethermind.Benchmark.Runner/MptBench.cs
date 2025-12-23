@@ -43,6 +43,9 @@ public class MptBench
         initConfig.BaseDbPath = fullPath;
         initConfig.DiagnosticMode = DiagnosticMode.None;
 
+        // 显式设置 DataDir，防止它跑去默认的 logs 或其他地方
+        initConfig.DataDir = fullPath;
+
         IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
         pruningConfig.Mode = PruningMode.None; // Archive mode
         pruningConfig.PersistenceInterval = 1;
@@ -173,7 +176,41 @@ public class MptBench
     private static long GetDirSize(string path)
     {
         if (!Directory.Exists(path)) return 0;
-        return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Sum(t => new FileInfo(t).Length);
+        try
+        {
+            var allFiles = Directory.GetFiles(path, "*", SearchOption.AllDirectories)
+                .Select(f => new FileInfo(f))
+                .ToList();
+
+            long totalSize = allFiles.Sum(f => f.Length);
+            
+            Console.WriteLine($"\nScanning directory: {path}");
+            Console.WriteLine($"Found {allFiles.Count} files. Total size: {totalSize / 1024.0 / 1024.0:F2} MB");
+
+            if (totalSize < 5 * 1024 * 1024) 
+            {
+                Console.WriteLine("Files found:");
+                foreach (var f in allFiles)
+                {
+                    Console.WriteLine($"  - {Path.GetRelativePath(path, f.FullName)} ({f.Length / 1024.0:F1} KB)");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Top 5 space consumers:");
+                foreach (var f in allFiles.OrderByDescending(f => f.Length).Take(5))
+                {
+                    Console.WriteLine($"  - {Path.GetRelativePath(path, f.FullName)}: {f.Length / 1024.0 / 1024.0:F2} MB");
+                }
+            }
+            
+            return totalSize;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error calculating directory size: {ex.Message}");
+            return 0;
+        }
     }
 }
 
