@@ -1,0 +1,166 @@
+// SPDX-FileCopyrightText: 2025 Demerzel Solutions Limited
+// SPDX-License-Identifier: LGPL-3.0-only
+
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using Autofac;
+using Nethermind.Api;
+using Nethermind.Config;
+using Nethermind.Core;
+using Nethermind.Core.Crypto;
+using Nethermind.Core.Specs;
+using Nethermind.Core.Test.Builders;
+using Nethermind.Core.Test.Modules;
+using Nethermind.Db;
+using Nethermind.Db.Rocks.Config;
+using Nethermind.Evm.State;
+using Nethermind.Int256;
+using Nethermind.Specs.Forks;
+using Nethermind.State;
+using Nethermind.Logging;
+
+namespace Nethermind.Benchmark.Runner;
+
+public class MptBench
+{
+    public static void Run(int nAccounts = 100, int nSlots = 1000, int mModify = 10, int kCommit = 50, string dbPath = "mpt_bench_db")
+    {
+        if (Directory.Exists(dbPath))
+        {
+            Console.WriteLine($"Cleaning up old database at {dbPath}...");
+            Directory.Delete(dbPath, true);
+        }
+
+        Directory.CreateDirectory(dbPath);
+
+        Console.WriteLine($"Initializing RocksDB at {dbPath}...");
+        ConfigProvider configProvider = new();
+        IInitConfig initConfig = configProvider.GetConfig<IInitConfig>();
+        initConfig.BaseDbPath = dbPath;
+        initConfig.DiagnosticMode = DiagnosticMode.None;
+
+        IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
+        pruningConfig.Mode = PruningMode.None; // Archive mode
+        pruningConfig.PersistenceInterval = 1;
+
+        var container = new ContainerBuilder()
+            .AddModule(new TestNethermindModule(configProvider))
+            .Build();
+
+        IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
+        IWorldState worldState = worldStateManager.GlobalWorldState;
+        IReleaseSpec releaseSpec = new Prague();
+
+        // Phase 1: Creation
+        Console.WriteLine($"Phase 1: Creating {nAccounts} accounts with {nSlots} slots each (k={kCommit})...");
+        Stopwatch sw = Stopwatch.StartNew();
+
+        Address[] addrs = new Address[nAccounts];
+        Hash256 currentRoot = Hash256.Zero;
+        BlockHeader currentHeader = IWorldState.PreGenesis;
+
+        for (int i = 0; i < nAccounts; i++)
+        {
+            byte[] addrBytes = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"account-{i}")).Bytes.Slice(0, 20).ToArray();
+            Address addr = new Address(addrBytes);
+            addrs[i] = addr;
+
+            using (worldState.BeginScope(currentHeader))
+            {
+                worldState.AddToBalanceAndCreateIfNotExists(addr, (UInt256)1e18, releaseSpec);
+                worldState.SetNonce(addr, (UInt256)i);
+
+                for (int j = 0; j < nSlots; j++)
+                {
+                    UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{j}")).Bytes);
+                    byte[] slotVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"value-{j}")).Bytes.ToArray();
+                    worldState.Set(new StorageCell(addr, slotKey), slotVal);
+                }
+
+                if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
+                {
+                    Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
+                }
+
+                // Periodic commit
+                if ((i + 1) % kCommit == 0 || i + 1 == nAccounts)
+                {
+                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committing to disk...");
+                    worldState.Commit(releaseSpec);
+                    worldState.CommitTree(i / kCommit);
+                    currentRoot = worldState.StateRoot;
+                    currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
+                    
+                    // Release memory by resetting world state and suggesting GC
+                    worldState.Reset();
+                    GC.Collect();
+                }
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Creation finished in {sw.Elapsed}. Final Root: {currentRoot}");
+
+        // Phase 2: Modification
+        mModify = Math.Min(mModify, nAccounts);
+        Console.WriteLine($"Phase 2: Randomly modifying slots in {mModify} accounts (k={kCommit})...");
+        sw.Restart();
+
+        Random rand = new Random();
+        int[] perm = Enumerable.Range(0, nAccounts).OrderBy(x => rand.Next()).ToArray();
+
+        for (int i = 0; i < mModify; i++)
+        {
+            Address addr = addrs[perm[i]];
+
+            using (worldState.BeginScope(currentHeader))
+            {
+                // Modify 500 random slots per account
+                for (int j = 0; j < 500; j++)
+                {
+                    int slotIdx = rand.Next(nSlots);
+                    UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{slotIdx}")).Bytes);
+                    byte[] newVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"new-value-{i}-{j}")).Bytes.ToArray();
+                    worldState.Set(new StorageCell(addr, slotKey), newVal);
+                }
+
+                if ((i + 1) % 10 == 0 || i + 1 == mModify)
+                {
+                    Console.Write($"\r...modified {i + 1}/{mModify} accounts ({(double)(i + 1) / mModify * 100:F1}%)");
+                }
+
+                if ((i + 1) % kCommit == 0 || i + 1 == mModify)
+                {
+                    Console.WriteLine($"\n[Mod Batch] Committing to disk...");
+                    worldState.Commit(releaseSpec);
+                    worldState.CommitTree((i / kCommit) + 1000000);
+                    currentRoot = worldState.StateRoot;
+                    currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
+                    
+                    worldState.Reset();
+                    GC.Collect();
+                }
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Modification finished in {sw.Elapsed}. Final New Root: {currentRoot}");
+
+        container.Dispose();
+
+        // Final Report
+        long size = GetDirSize(dbPath);
+        Console.WriteLine("\n--- Final Report ---");
+        Console.WriteLine($"Database Path: {Path.GetFullPath(dbPath)}");
+        Console.WriteLine($"Disk Usage:    {(double)size / (1024 * 1024):F2} MB");
+    }
+
+    private static long GetDirSize(string path)
+    {
+        if (!Directory.Exists(path)) return 0;
+        return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Sum(t => new FileInfo(t).Length);
+    }
+}
+

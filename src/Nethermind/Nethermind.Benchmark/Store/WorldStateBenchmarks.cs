@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 using System;
+using System.IO;
 using System.Linq;
 using Autofac;
 using BenchmarkDotNet.Attributes;
 using DotNetty.Common.Utilities;
+using Nethermind.Api;
+using Nethermind.Config;
 using Nethermind.Core;
 using Nethermind.Core.Specs;
 using Nethermind.Core.Test.Builders;
 using Nethermind.Core.Test.Modules;
+using Nethermind.Db;
+using Nethermind.Db.Rocks.Config;
 using Nethermind.Evm.State;
 using Nethermind.Int256;
 using Nethermind.Specs.Forks;
@@ -21,12 +26,21 @@ public class WorldStateBenchmarks
 {
     private IContainer _container;
     private IWorldState _globalWorldState;
+    private string _tempDbPath;
 
-    private const int _accountCount = 1024 * 4;
-    private const int _contractCount = 128;
-    private const int _slotsCount = _contractCount * 128;
-    private const int _bigContractSlotsCount = 1024 * 4;
-    private const int _loopSize = 1024 * 10;
+    [Params(4096, 16384)]
+    public int AccountCount { get; set; }
+
+    [Params(128, 512)]
+    public int ContractCount { get; set; }
+
+    public int SlotsCount => ContractCount * 128;
+
+    [Params(4096, 16384)]
+    public int BigContractSlotsCount { get; set; }
+
+    [Params(1024, 10240)]
+    public int LoopSize { get; set; }
 
     private Address[] _accounts;
     private Address[] _contracts;
@@ -39,9 +53,24 @@ public class WorldStateBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        // Note: The whole thing is in pruning cache, so the KV db is not touched in this benchmark.
+        _tempDbPath = Path.Combine(Path.GetTempPath(), "nethermind_benchmark_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_tempDbPath);
+
+        ConfigProvider configProvider = new();
+        IInitConfig initConfig = configProvider.GetConfig<IInitConfig>();
+        initConfig.BaseDbPath = _tempDbPath;
+        initConfig.DiagnosticMode = DiagnosticMode.None; // Ensure it uses RocksDb
+
+        IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
+        pruningConfig.Mode = PruningMode.None; // Archive mode persists everything
+        pruningConfig.PersistenceInterval = 1;
+
+        IDbConfig dbConfig = configProvider.GetConfig<IDbConfig>();
+        // You can also tune RocksDb options here if needed
+        // dbConfig.StateDbRocksDbOptions = "...";
+
         _container = new ContainerBuilder()
-            .AddModule(new TestNethermindModule())
+            .AddModule(new TestNethermindModule(configProvider))
             .Build();
 
         IWorldState worldState = _globalWorldState = _container.Resolve<IWorldStateManager>().GlobalWorldState;
@@ -49,8 +78,8 @@ public class WorldStateBenchmarks
 
         Random rand = new Random(0);
         byte[] randomBuffer = new byte[20];
-        _accounts = new Address[_accountCount];
-        for (int i = 0; i < _accountCount; i++)
+        _accounts = new Address[AccountCount];
+        for (int i = 0; i < AccountCount; i++)
         {
             rand.NextBytes(randomBuffer);
             Address account = new Address(randomBuffer.ToArray());
@@ -58,8 +87,8 @@ public class WorldStateBenchmarks
             _accounts[i] = account;
         }
 
-        _contracts = new Address[_contractCount];
-        for (int i = 0; i < _contractCount; i++)
+        _contracts = new Address[ContractCount];
+        for (int i = 0; i < ContractCount; i++)
         {
             rand.NextBytes(randomBuffer);
             Address account = new Address(randomBuffer.ToArray());
@@ -67,8 +96,8 @@ public class WorldStateBenchmarks
             _contracts[i] = account;
         }
 
-        _slots = new (Address, UInt256)[_slotsCount];
-        for (int i = 0; i < _slotsCount; i++)
+        _slots = new (Address, UInt256)[SlotsCount];
+        for (int i = 0; i < SlotsCount; i++)
         {
             Address account = _contracts[rand.Next(0, _contracts.Length)];
             UInt256 slot = (UInt256)rand.NextLong();
@@ -80,8 +109,8 @@ public class WorldStateBenchmarks
         rand.NextBytes(randomBuffer);
         _bigContract = new Address(randomBuffer.ToArray());
         worldState.AddToBalanceAndCreateIfNotExists(_bigContract, 1, _releaseSpec);
-        _bigContractSlots = new UInt256[_bigContractSlotsCount];
-        for (int i = 0; i < _bigContractSlotsCount; i++)
+        _bigContractSlots = new UInt256[BigContractSlotsCount];
+        for (int i = 0; i < BigContractSlotsCount; i++)
         {
             UInt256 slot = (UInt256)rand.NextLong();
             rand.NextBytes(randomBuffer);
@@ -99,6 +128,17 @@ public class WorldStateBenchmarks
     public void Teardown()
     {
         _container.Dispose();
+        if (Directory.Exists(_tempDbPath))
+        {
+            try
+            {
+                Directory.Delete(_tempDbPath, true);
+            }
+            catch
+            {
+                // Ignore cleanup errors
+            }
+        }
     }
 
     [Benchmark]
@@ -108,7 +148,7 @@ public class WorldStateBenchmarks
         IWorldState worldState = _globalWorldState;
         using var _ = worldState.BeginScope(_baseBlock);
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             worldState.GetBalance(_accounts[rand.Next(0, _accounts.Length)]);
         }
@@ -123,7 +163,7 @@ public class WorldStateBenchmarks
         IWorldState worldState = _globalWorldState;
         using var _ = worldState.BeginScope(_baseBlock);
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             if (rand.NextDouble() < 0.5)
             {
@@ -147,7 +187,7 @@ public class WorldStateBenchmarks
         IWorldState worldState = _globalWorldState;
         using var _ = worldState.BeginScope(_baseBlock);
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             (Address Account, UInt256 Slot) slot = _slots[rand.Next(0, _slots.Length)];
             worldState.Get(new StorageCell(slot.Account, slot.Slot));
@@ -164,7 +204,7 @@ public class WorldStateBenchmarks
         using var _ = worldState.BeginScope(_baseBlock);
         byte[] randomBuffer = new byte[20];
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             (Address Account, UInt256 Slot) slot = _slots[rand.Next(0, _slots.Length)];
             if (rand.NextDouble() < 0.5)
@@ -190,7 +230,7 @@ public class WorldStateBenchmarks
         IWorldState worldState = _globalWorldState;
         using var _ = worldState.BeginScope(_baseBlock);
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             UInt256 slot = _bigContractSlots[rand.Next(0, _bigContractSlots.Length)];
             worldState.Get(new StorageCell(_bigContract, slot));
@@ -207,7 +247,7 @@ public class WorldStateBenchmarks
         using var _ = worldState.BeginScope(_baseBlock);
         byte[] randomBuffer = new byte[20];
 
-        for (int i = 0; i < _loopSize; i++)
+        for (int i = 0; i < LoopSize; i++)
         {
             UInt256 slot = _bigContractSlots[rand.Next(0, _bigContractSlots.Length)];
             if (rand.NextDouble() < 0.5)

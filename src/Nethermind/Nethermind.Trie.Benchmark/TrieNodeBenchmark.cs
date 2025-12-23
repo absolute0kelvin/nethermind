@@ -14,7 +14,7 @@ using Nethermind.Trie.Pruning;
 namespace Nethermind.Trie.Benchmark
 {
     [MemoryDiagnoser]
-    [DryJob(RuntimeMoniker.NetCoreApp31)]
+    [DryJob]
     public class TrieNodeBenchmark
     {
         // public readonly struct Param

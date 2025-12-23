@@ -39,7 +39,7 @@ namespace Nethermind.Benchmark.Runner
 
     public class PrecompileBenchmarkConfig : DashboardConfig
     {
-        public PrecompileBenchmarkConfig() : base(Job.MediumRun.WithRuntime(CoreRuntime.Core90))
+        public PrecompileBenchmarkConfig() : base(Job.MediumRun)
         {
             AddColumnProvider(new GasColumnProvider());
         }
@@ -49,6 +49,20 @@ namespace Nethermind.Benchmark.Runner
     {
         public static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "mpt-bench")
+            {
+                int n = 100;
+                int slots = 1000;
+                int mModify = 10;
+                int kCommit = 50;
+                if (args.Length > 1) int.TryParse(args[1], out n);
+                if (args.Length > 2) int.TryParse(args[2], out slots);
+                if (args.Length > 3) int.TryParse(args[3], out mModify);
+                if (args.Length > 4) int.TryParse(args[4], out kCommit);
+                MptBench.Run(n, slots, mModify, kCommit);
+                return;
+            }
+
             List<Assembly> additionalJobAssemblies = [
                 typeof(JsonRpc.Benchmark.EthModuleBenchmarks).Assembly,
                 typeof(Benchmarks.Core.Keccak256Benchmarks).Assembly,
@@ -68,7 +82,7 @@ namespace Nethermind.Benchmark.Runner
             {
                 foreach (Assembly assembly in additionalJobAssemblies)
                 {
-                    BenchmarkRunner.Run(assembly, new DashboardConfig(Job.MediumRun.WithRuntime(CoreRuntime.Core90)), args);
+                    BenchmarkRunner.Run(assembly, new DashboardConfig(Job.MediumRun), args);
                 }
 
                 foreach (Assembly assembly in simpleJobAssemblies)
