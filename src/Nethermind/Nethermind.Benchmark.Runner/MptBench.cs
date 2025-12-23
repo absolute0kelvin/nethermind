@@ -73,45 +73,46 @@ public class MptBench
         Hash256 currentRoot = Hash256.Zero;
         BlockHeader currentHeader = IWorldState.PreGenesis;
 
-        for (int i = 0; i < nAccounts; i++)
+        for (int batchStart = 0; batchStart < nAccounts; batchStart += kCommit)
         {
-            byte[] addrBytes = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"account-{i}")).Bytes.Slice(0, 20).ToArray();
-            Address addr = new Address(addrBytes);
-            addrs[i] = addr;
-
+            int batchEnd = Math.Min(batchStart + kCommit, nAccounts);
+            
             using (worldState.BeginScope(currentHeader))
             {
-                worldState.AddToBalanceAndCreateIfNotExists(addr, (UInt256)1e18, releaseSpec);
-                worldState.SetNonce(addr, (UInt256)i);
-
-                for (int j = 0; j < nSlots; j++)
+                for (int i = batchStart; i < batchEnd; i++)
                 {
-                    UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{j}")).Bytes);
-                    byte[] slotVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"value-{j}")).Bytes.ToArray();
-                    worldState.Set(new StorageCell(addr, slotKey), slotVal);
+                    byte[] addrBytes = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"account-{i}")).Bytes.Slice(0, 20).ToArray();
+                    Address addr = new Address(addrBytes);
+                    addrs[i] = addr;
+
+                    worldState.AddToBalanceAndCreateIfNotExists(addr, (UInt256)1e18, releaseSpec);
+                    worldState.SetNonce(addr, (UInt256)i);
+
+                    for (int j = 0; j < nSlots; j++)
+                    {
+                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{j}")).Bytes);
+                        byte[] slotVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"value-{j}")).Bytes.ToArray();
+                        worldState.Set(new StorageCell(addr, slotKey), slotVal);
+                    }
+
+                    if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
+                    {
+                        Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
+                    }
                 }
 
-                if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
-                {
-                    Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
-                }
-
-                // Periodic commit
-                if ((i + 1) % kCommit == 0 || i + 1 == nAccounts)
-                {
-                    worldState.Commit(releaseSpec);
-                    worldState.CommitTree(i / kCommit);
-                    currentRoot = worldState.StateRoot;
-                    currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
-                    
-                    // Release memory by resetting world state and suggesting GC
-                    worldState.Reset();
-                    GC.Collect();
-                    
-                    long currentSize = GetDirSize(fullPath);
-                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
-                }
+                // Batch commit
+                worldState.Commit(releaseSpec);
+                worldState.CommitTree(batchStart / kCommit);
+                currentRoot = worldState.StateRoot;
+                currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
+                
+                worldState.Reset();
             }
+            
+            GC.Collect();
+            long currentSize = GetDirSize(fullPath);
+            Console.WriteLine($"\n[Batch {(batchStart / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
         }
 
         Console.WriteLine();
@@ -126,39 +127,42 @@ public class MptBench
         Random rand = new Random();
         int[] perm = Enumerable.Range(0, nAccounts).OrderBy(x => rand.Next()).ToArray();
 
-        for (int i = 0; i < mModify; i++)
+        for (int batchStart = 0; batchStart < mModify; batchStart += kCommit)
         {
-            Address addr = addrs[perm[i]];
+            int batchEnd = Math.Min(batchStart + kCommit, mModify);
 
             using (worldState.BeginScope(currentHeader))
             {
-                // Modify 500 random slots per account
-                for (int j = 0; j < 500; j++)
+                for (int i = batchStart; i < batchEnd; i++)
                 {
-                    int slotIdx = rand.Next(nSlots);
-                    UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{slotIdx}")).Bytes);
-                    byte[] newVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"new-value-{i}-{j}")).Bytes.ToArray();
-                    worldState.Set(new StorageCell(addr, slotKey), newVal);
+                    Address addr = addrs[perm[i]];
+
+                    // Modify 500 random slots per account
+                    for (int j = 0; j < 500; j++)
+                    {
+                        int slotIdx = rand.Next(nSlots);
+                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{slotIdx}")).Bytes);
+                        byte[] newVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"new-value-{i}-{j}")).Bytes.ToArray();
+                        worldState.Set(new StorageCell(addr, slotKey), newVal);
+                    }
+
+                    if ((i + 1) % 10 == 0 || i + 1 == mModify)
+                    {
+                        Console.Write($"\r...modified {i + 1}/{mModify} accounts ({(double)(i + 1) / mModify * 100:F1}%)");
+                    }
                 }
 
-                if ((i + 1) % 10 == 0 || i + 1 == mModify)
-                {
-                    Console.Write($"\r...modified {i + 1}/{mModify} accounts ({(double)(i + 1) / mModify * 100:F1}%)");
-                }
-
-                if ((i + 1) % kCommit == 0 || i + 1 == mModify)
-                {
-                    worldState.Commit(releaseSpec);
-                    worldState.CommitTree((i / kCommit) + 1000000);
-                    currentRoot = worldState.StateRoot;
-                    currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
-                    
-                    worldState.Reset();
-                    GC.Collect();
-                    long currentSize = GetDirSize(fullPath);
-                    Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
-                }
+                worldState.Commit(releaseSpec);
+                worldState.CommitTree((batchStart / kCommit) + 1000000);
+                currentRoot = worldState.StateRoot;
+                currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
+                
+                worldState.Reset();
             }
+            
+            GC.Collect();
+            long currentSize = GetDirSize(fullPath);
+            Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
         }
 
         Console.WriteLine();
