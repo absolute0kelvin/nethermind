@@ -185,33 +185,9 @@ public class MptBench
         if (!Directory.Exists(path)) return 0;
         try
         {
-            var allFiles = Directory.GetFiles(path, "*", SearchOption.AllDirectories)
+            return Directory.GetFiles(path, "*", SearchOption.AllDirectories)
                 .Select(f => new FileInfo(f))
-                .ToList();
-
-            long totalSize = allFiles.Sum(f => f.Length);
-            
-            Console.WriteLine($"\nScanning directory: {path}");
-            Console.WriteLine($"Found {allFiles.Count} files. Total size: {totalSize / 1024.0 / 1024.0:F2} MB");
-
-            if (totalSize < 5 * 1024 * 1024) 
-            {
-                Console.WriteLine("Files found:");
-                foreach (var f in allFiles)
-                {
-                    Console.WriteLine($"  - {Path.GetRelativePath(path, f.FullName)} ({f.Length / 1024.0:F1} KB)");
-                }
-            }
-            else
-            {
-                Console.WriteLine("Top 5 space consumers:");
-                foreach (var f in allFiles.OrderByDescending(f => f.Length).Take(5))
-                {
-                    Console.WriteLine($"  - {Path.GetRelativePath(path, f.FullName)}: {f.Length / 1024.0 / 1024.0:F2} MB");
-                }
-            }
-            
-            return totalSize;
+                .Sum(f => f.Length);
         }
         catch (Exception ex)
         {
