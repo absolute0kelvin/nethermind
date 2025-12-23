@@ -87,7 +87,6 @@ public class MptBench
                 // Periodic commit
                 if ((i + 1) % kCommit == 0 || i + 1 == nAccounts)
                 {
-                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committing to disk...");
                     worldState.Commit(releaseSpec);
                     worldState.CommitTree(i / kCommit);
                     currentRoot = worldState.StateRoot;
@@ -96,12 +95,15 @@ public class MptBench
                     // Release memory by resetting world state and suggesting GC
                     worldState.Reset();
                     GC.Collect();
+                    
+                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
                 }
             }
         }
 
         Console.WriteLine();
         Console.WriteLine($"Creation finished in {sw.Elapsed}. Final Root: {currentRoot}");
+        Console.WriteLine($"Disk Usage after Phase 1 (Creation): {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
 
         // Phase 2: Modification
         mModify = Math.Min(mModify, nAccounts);
@@ -133,7 +135,6 @@ public class MptBench
 
                 if ((i + 1) % kCommit == 0 || i + 1 == mModify)
                 {
-                    Console.WriteLine($"\n[Mod Batch] Committing to disk...");
                     worldState.Commit(releaseSpec);
                     worldState.CommitTree((i / kCommit) + 1000000);
                     currentRoot = worldState.StateRoot;
@@ -141,6 +142,7 @@ public class MptBench
                     
                     worldState.Reset();
                     GC.Collect();
+                    Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
                 }
             }
         }
