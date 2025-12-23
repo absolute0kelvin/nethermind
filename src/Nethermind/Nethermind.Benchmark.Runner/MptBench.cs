@@ -14,6 +14,7 @@ using Nethermind.Core.Specs;
 using Nethermind.Core.Test.Builders;
 using Nethermind.Core.Test.Modules;
 using Nethermind.Db;
+using Nethermind.Db.Rocks;
 using Nethermind.Db.Rocks.Config;
 using Nethermind.Evm.State;
 using Nethermind.Int256;
@@ -46,9 +47,15 @@ public class MptBench
         pruningConfig.Mode = PruningMode.None; // Archive mode
         pruningConfig.PersistenceInterval = 1;
         pruningConfig.DirtyCacheMb = 1; // 强制极小缓存，迫使数据下刷到磁盘
+        pruningConfig.PruningBoundary = 0; // 强制立即持久化
+
+        IDbConfig dbConfig = configProvider.GetConfig<IDbConfig>();
+        dbConfig.WriteAheadLogSync = true;
 
         var container = new ContainerBuilder()
             .AddModule(new TestNethermindModule(configProvider))
+            .AddSingleton<IRocksDbConfigFactory, RocksDbConfigFactory>()
+            .AddSingleton<IDbFactory, RocksDbFactory>()
             .Build();
 
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
