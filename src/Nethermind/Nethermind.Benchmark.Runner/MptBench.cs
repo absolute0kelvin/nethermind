@@ -21,6 +21,7 @@ using Nethermind.Int256;
 using Nethermind.Specs.Forks;
 using Nethermind.State;
 using Nethermind.Logging;
+using Nethermind.Trie.Pruning;
 
 namespace Nethermind.Benchmark.Runner;
 
@@ -63,6 +64,10 @@ public class MptBench
 
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
         IWorldState worldState = worldStateManager.GlobalWorldState;
+        
+        // 获取底层的 TrieStore 以便强制执行同步下刷
+        IPruningTrieStore trieStore = worldStateManager.SyncTrieStore as IPruningTrieStore;
+        
         IReleaseSpec releaseSpec = new Prague();
 
         // Phase 1: Creation
@@ -94,11 +99,6 @@ public class MptBench
                         byte[] slotVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"value-{j}")).Bytes.ToArray();
                         worldState.Set(new StorageCell(addr, slotKey), slotVal);
                     }
-
-                    if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
-                    {
-                        Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
-                    }
                 }
 
                 // Batch commit
@@ -109,10 +109,13 @@ public class MptBench
                 
                 worldState.Reset();
             }
+
+            // 强制将 TrieStore 中的脏节点同步到磁盘 (关键修复点)
+            trieStore.SyncPruneCheck();
             
-            GC.Collect();
+            GC.Collect(2, GCCollectionMode.Forced, true);
             long currentSize = GetDirSize(fullPath);
-            Console.WriteLine($"\n[Batch {(batchStart / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
+            Console.WriteLine($"\r[Batch {(batchStart / kCommit) + 1}/{Math.Ceiling((double)nAccounts / kCommit)}] Root: {currentRoot.ToShortString()} | Disk: {currentSize / 1024.0 / 1024.0:F2} MB | Memory: {Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0:F2} MB");
         }
 
         Console.WriteLine();
