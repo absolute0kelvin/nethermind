@@ -5,6 +5,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using Autofac;
 using Nethermind.Api;
 using Nethermind.Config;
@@ -65,9 +66,6 @@ public class MptBench
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
         IWorldState worldState = worldStateManager.GlobalWorldState;
         
-        // 获取底层的 TrieStore 以便强制执行同步下刷
-        IPruningTrieStore trieStore = worldStateManager.SyncTrieStore as IPruningTrieStore;
-        
         IReleaseSpec releaseSpec = new Prague();
 
         // Phase 1: Creation
@@ -110,8 +108,8 @@ public class MptBench
                 worldState.Reset();
             }
 
-            // 强制将 TrieStore 中的脏节点同步到磁盘 (关键修复点)
-            trieStore.SyncPruneCheck();
+            // 强制将 TrieStore 中的脏节点同步到磁盘并清空内存缓存 (关键修复点)
+            worldStateManager.FlushCache(CancellationToken.None);
             
             GC.Collect(2, GCCollectionMode.Forced, true);
             long currentSize = GetDirSize(fullPath);
@@ -162,6 +160,8 @@ public class MptBench
                 
                 worldState.Reset();
             }
+            
+            worldStateManager.FlushCache(CancellationToken.None);
             
             GC.Collect();
             long currentSize = GetDirSize(fullPath);
