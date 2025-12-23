@@ -27,23 +27,25 @@ public class MptBench
 {
     public static void Run(int nAccounts = 100, int nSlots = 1000, int mModify = 10, int kCommit = 50, string dbPath = "mpt_bench_db")
     {
-        if (Directory.Exists(dbPath))
+        string fullPath = Path.GetFullPath(dbPath);
+        if (Directory.Exists(fullPath))
         {
-            Console.WriteLine($"Cleaning up old database at {dbPath}...");
-            Directory.Delete(dbPath, true);
+            Console.WriteLine($"Cleaning up old database at {fullPath}...");
+            Directory.Delete(fullPath, true);
         }
 
-        Directory.CreateDirectory(dbPath);
+        Directory.CreateDirectory(fullPath);
 
-        Console.WriteLine($"Initializing RocksDB at {dbPath}...");
+        Console.WriteLine($"Initializing RocksDB at {fullPath}...");
         ConfigProvider configProvider = new();
         IInitConfig initConfig = configProvider.GetConfig<IInitConfig>();
-        initConfig.BaseDbPath = dbPath;
+        initConfig.BaseDbPath = fullPath;
         initConfig.DiagnosticMode = DiagnosticMode.None;
 
         IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
         pruningConfig.Mode = PruningMode.None; // Archive mode
         pruningConfig.PersistenceInterval = 1;
+        pruningConfig.DirtyCacheMb = 1; // 强制极小缓存，迫使数据下刷到磁盘
 
         var container = new ContainerBuilder()
             .AddModule(new TestNethermindModule(configProvider))
@@ -96,14 +98,15 @@ public class MptBench
                     worldState.Reset();
                     GC.Collect();
                     
-                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
+                    long currentSize = GetDirSize(fullPath);
+                    Console.WriteLine($"\n[Batch {(i / kCommit) + 1}] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
                 }
             }
         }
 
         Console.WriteLine();
         Console.WriteLine($"Creation finished in {sw.Elapsed}. Final Root: {currentRoot}");
-        Console.WriteLine($"Disk Usage after Phase 1 (Creation): {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
+        Console.WriteLine($"Disk Usage after Phase 1 (Creation): {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
 
         // Phase 2: Modification
         mModify = Math.Min(mModify, nAccounts);
@@ -142,7 +145,8 @@ public class MptBench
                     
                     worldState.Reset();
                     GC.Collect();
-                    Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)GetDirSize(dbPath) / (1024 * 1024):F2} MB");
+                    long currentSize = GetDirSize(fullPath);
+                    Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
                 }
             }
         }
@@ -153,10 +157,10 @@ public class MptBench
         container.Dispose();
 
         // Final Report
-        long size = GetDirSize(dbPath);
+        long totalSize = GetDirSize(fullPath);
         Console.WriteLine("\n--- Final Report ---");
-        Console.WriteLine($"Database Path: {Path.GetFullPath(dbPath)}");
-        Console.WriteLine($"Disk Usage:    {(double)size / (1024 * 1024):F2} MB");
+        Console.WriteLine($"Database Path: {fullPath}");
+        Console.WriteLine($"Disk Usage:    {(double)totalSize / (1024 * 1024):F2} MB");
     }
 
     private static long GetDirSize(string path)
