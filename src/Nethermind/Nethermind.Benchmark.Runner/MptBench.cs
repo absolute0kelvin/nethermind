@@ -22,6 +22,7 @@ using Nethermind.Int256;
 using Nethermind.Specs.Forks;
 using Nethermind.State;
 using Nethermind.Logging;
+using Nethermind.Trie;
 using Nethermind.Trie.Pruning;
 
 namespace Nethermind.Benchmark.Runner;
@@ -46,23 +47,19 @@ public class MptBench
         initConfig.DataDir = fullPath;
         initConfig.DiagnosticMode = DiagnosticMode.None;
         
-        // 切换回 Nethermind 优化的 Path 方案
-        initConfig.StateDbKeyScheme = INodeStorage.KeyScheme.Path;
+        // 使用 Nethermind 的 HalfPath 方案
+        initConfig.StateDbKeyScheme = INodeStorage.KeyScheme.HalfPath;
 
         IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
         pruningConfig.Mode = PruningMode.Hybrid; 
         pruningConfig.PersistenceInterval = 1;
-        pruningConfig.DirtyCacheMb = 2048; // 调大至 2GB，极致追求速度
+        pruningConfig.DirtyCacheMb = 2048; // 2GB Cache
         pruningConfig.PruningBoundary = 64; 
-
-        // 开启多线程并行 Commit 关键配置
-        ITrieConfig trieConfig = configProvider.GetConfig<ITrieConfig>();
-        trieConfig.ParallelHashThreshold = 500; // 降低阈值，强制在大批量操作时开启多核并行计算
 
         IDbConfig dbConfig = configProvider.GetConfig<IDbConfig>();
         dbConfig.WriteAheadLogSync = false; 
         
-        // 极致性能 RocksDB 配置 (更大的 MemTable 和优化后台 IO)
+        // 极致性能 RocksDB 配置
         dbConfig.RocksDbOptions = "compression=kNoCompression;bottommost_compression=kNoCompression;" + 
                                   "write_buffer_size=536870912;max_write_buffer_number=6;min_write_buffer_number_to_merge=2;" +
                                   "target_file_size_base=134217728;max_bytes_for_level_base=1073741824;" +
@@ -73,14 +70,13 @@ public class MptBench
             .AddModule(new TestNethermindModule(configProvider))
             .AddSingleton<IRocksDbConfigFactory, RocksDbConfigFactory>()
             .AddSingleton<IDbFactory, RocksDbFactory>()
-            // 确保使用并行构建器以压榨 CPU
             .Build();
 
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
         IWorldState worldState = worldStateManager.GlobalWorldState;
         IReleaseSpec releaseSpec = new Prague();
 
-        Console.WriteLine($"Phase 1: Creating {nAccounts} accounts with variable slots (avg {nSlots}, Scheme: Path)...");
+        Console.WriteLine($"Phase 1: Creating {nAccounts} accounts with variable slots (avg {nSlots}, Scheme: HalfPath)...");
         Stopwatch sw = Stopwatch.StartNew();
 
         Address[] addrs = new Address[nAccounts];
@@ -104,13 +100,11 @@ public class MptBench
                     worldState.AddToBalanceAndCreateIfNotExists(addr, (UInt256)1e18, releaseSpec);
                     worldState.SetNonce(addr, (UInt256)i);
 
-                    // 优化：不再是固定 1000 个，而是在 0 到 nSlots*2 之间波动
                     int variableSlots = rand.Next(nSlots * 2);
                     for (int j = 0; j < variableSlots; j++)
                     {
                         UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{i}-slot-{j}")).Bytes);
                         
-                        // 优化：模拟真实数据，30% 的概率写入零值或小值，提高压缩测试的真实性
                         int dice = rand.Next(100);
                         if (dice < 20) Array.Clear(valBuffer, 0, 32);
                         else if (dice < 30) { Array.Clear(valBuffer, 0, 32); valBuffer[31] = 1; }
@@ -158,10 +152,9 @@ public class MptBench
                     int accountIdx = perm[i];
                     Address addr = addrs[accountIdx];
 
-                    // 每次修改随机 100 个 Slots
                     for (int j = 0; j < 100; j++)
                     {
-                        int slotIdx = rand.Next(nSlots); // 尝试修改可能存在的 Slot
+                        int slotIdx = rand.Next(nSlots); 
                         UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{accountIdx}-slot-{slotIdx}")).Bytes);
                         rand.NextBytes(valBuffer);
                         worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
