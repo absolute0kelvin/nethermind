@@ -50,22 +50,30 @@ public class MptBench
         initConfig.StateDbKeyScheme = INodeStorage.KeyScheme.Path;
 
         IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
-        // 调整为生产最常用的 Hybrid 模式
         pruningConfig.Mode = PruningMode.Hybrid; 
         pruningConfig.PersistenceInterval = 1;
-        pruningConfig.DirtyCacheMb = 256; 
-        pruningConfig.PruningBoundary = 64; // 保留最近 64 个块的状态
+        pruningConfig.DirtyCacheMb = 2048; // 调大至 2GB，极致追求速度
+        pruningConfig.PruningBoundary = 64; 
+
+        // 开启多线程并行 Commit 关键配置
+        ITrieConfig trieConfig = configProvider.GetConfig<ITrieConfig>();
+        trieConfig.ParallelHashThreshold = 500; // 降低阈值，强制在大批量操作时开启多核并行计算
 
         IDbConfig dbConfig = configProvider.GetConfig<IDbConfig>();
         dbConfig.WriteAheadLogSync = false; 
         
-        // 显式关闭所有压缩
-        dbConfig.RocksDbOptions = "compression=kNoCompression;bottommost_compression=kNoCompression;level0_file_num_compaction_trigger=4;";
+        // 极致性能 RocksDB 配置 (更大的 MemTable 和优化后台 IO)
+        dbConfig.RocksDbOptions = "compression=kNoCompression;bottommost_compression=kNoCompression;" + 
+                                  "write_buffer_size=536870912;max_write_buffer_number=6;min_write_buffer_number_to_merge=2;" +
+                                  "target_file_size_base=134217728;max_bytes_for_level_base=1073741824;" +
+                                  "block_based_table_factory={filter_policy=bloomfilter:10:false;block_cache=1073741824;};" +
+                                  "max_background_compactions=8;max_background_flushes=6;";
 
         var container = new ContainerBuilder()
             .AddModule(new TestNethermindModule(configProvider))
             .AddSingleton<IRocksDbConfigFactory, RocksDbConfigFactory>()
             .AddSingleton<IDbFactory, RocksDbFactory>()
+            // 确保使用并行构建器以压榨 CPU
             .Build();
 
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
