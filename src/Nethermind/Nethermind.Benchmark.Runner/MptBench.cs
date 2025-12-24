@@ -140,6 +140,7 @@ public class MptBench
         sw.Restart();
 
         int[] perm = Enumerable.Range(0, nAccounts).OrderBy(x => rand.Next()).ToArray();
+        long totalSlotsModified = 0;
 
         for (int batchStart = 0; batchStart < mModify; batchStart += kCommit)
         {
@@ -152,12 +153,14 @@ public class MptBench
                     int accountIdx = perm[i];
                     Address addr = addrs[accountIdx];
 
+                    // 每次修改随机 100 个 Slots
                     for (int j = 0; j < 100; j++)
                     {
                         int slotIdx = rand.Next(nSlots); 
                         UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{accountIdx}-slot-{slotIdx}")).Bytes);
                         rand.NextBytes(valBuffer);
                         worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
+                        totalSlotsModified++;
                     }
                 }
 
@@ -172,6 +175,9 @@ public class MptBench
             GC.Collect();
             Console.WriteLine($"\n[Mod Batch] Committed. Disk: {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
         }
+
+        Console.WriteLine();
+        Console.WriteLine($"Modification finished in {sw.Elapsed}. Total slots modified: {totalSlotsModified:N0}. Final New Root: {currentRoot}");
 
         container.Dispose();
         Console.WriteLine($"\n--- Final Report ---\nDisk Usage: {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
