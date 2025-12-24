@@ -43,19 +43,24 @@ public class MptBench
         ConfigProvider configProvider = new();
         IInitConfig initConfig = configProvider.GetConfig<IInitConfig>();
         initConfig.BaseDbPath = fullPath;
-        initConfig.DiagnosticMode = DiagnosticMode.None;
-
-        // 显式设置 DataDir，防止它跑去默认的 logs 或其他地方
         initConfig.DataDir = fullPath;
+        initConfig.DiagnosticMode = DiagnosticMode.None;
+        
+        // 切换回 Nethermind 优化的 Path 方案
+        initConfig.StateDbKeyScheme = INodeStorage.KeyScheme.Path;
 
         IPruningConfig pruningConfig = configProvider.GetConfig<IPruningConfig>();
-        pruningConfig.Mode = PruningMode.None; // Archive mode
+        // 调整为生产最常用的 Hybrid 模式
+        pruningConfig.Mode = PruningMode.Hybrid; 
         pruningConfig.PersistenceInterval = 1;
-        pruningConfig.DirtyCacheMb = 1; // 强制极小缓存，迫使数据下刷到磁盘
-        pruningConfig.PruningBoundary = 0; // 强制立即持久化
+        pruningConfig.DirtyCacheMb = 256; 
+        pruningConfig.PruningBoundary = 64; // 保留最近 64 个块的状态
 
         IDbConfig dbConfig = configProvider.GetConfig<IDbConfig>();
-        dbConfig.WriteAheadLogSync = true;
+        dbConfig.WriteAheadLogSync = false; 
+        
+        // 显式关闭所有压缩
+        dbConfig.RocksDbOptions = "compression=kNoCompression;bottommost_compression=kNoCompression;level0_file_num_compaction_trigger=4;";
 
         var container = new ContainerBuilder()
             .AddModule(new TestNethermindModule(configProvider))
@@ -65,11 +70,9 @@ public class MptBench
 
         IWorldStateManager worldStateManager = container.Resolve<IWorldStateManager>();
         IWorldState worldState = worldStateManager.GlobalWorldState;
-        
         IReleaseSpec releaseSpec = new Prague();
 
-        // Phase 1: Creation
-        Console.WriteLine($"Phase 1: Creating {nAccounts} accounts with {nSlots} slots each (k={kCommit})...");
+        Console.WriteLine($"Phase 1: Creating {nAccounts} accounts with variable slots (avg {nSlots}, Scheme: Path)...");
         Stopwatch sw = Stopwatch.StartNew();
 
         Address[] addrs = new Address[nAccounts];
@@ -93,43 +96,45 @@ public class MptBench
                     worldState.AddToBalanceAndCreateIfNotExists(addr, (UInt256)1e18, releaseSpec);
                     worldState.SetNonce(addr, (UInt256)i);
 
-                    for (int j = 0; j < nSlots; j++)
+                    // 优化：不再是固定 1000 个，而是在 0 到 nSlots*2 之间波动
+                    int variableSlots = rand.Next(nSlots * 2);
+                    for (int j = 0; j < variableSlots; j++)
                     {
-                        // 确保每个账号的 Key 都是唯一的
                         UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{i}-slot-{j}")).Bytes);
-                        rand.NextBytes(valBuffer);
+                        
+                        // 优化：模拟真实数据，30% 的概率写入零值或小值，提高压缩测试的真实性
+                        int dice = rand.Next(100);
+                        if (dice < 20) Array.Clear(valBuffer, 0, 32);
+                        else if (dice < 30) { Array.Clear(valBuffer, 0, 32); valBuffer[31] = 1; }
+                        else rand.NextBytes(valBuffer);
+
                         worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
                     }
 
                     if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
                     {
-                        Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
+                        Console.Write($"\r...processed {i + 1}/{nAccounts} accounts");
                     }
                 }
 
-                // Batch commit
                 worldState.Commit(releaseSpec);
                 worldState.CommitTree(batchStart / kCommit);
                 currentRoot = worldState.StateRoot;
                 currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
-                
                 worldState.Reset();
             }
 
             worldStateManager.FlushCache(CancellationToken.None);
-            
             GC.Collect(2, GCCollectionMode.Forced, true);
-            long currentSize = GetDirSize(fullPath);
-            Console.WriteLine($"\r[Batch {(batchStart / kCommit) + 1}/{Math.Ceiling((double)nAccounts / kCommit)}] Root: {currentRoot.ToShortString()} | Disk: {currentSize / 1024.0 / 1024.0:F2} MB | Memory: {Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0:F2} MB");
+            
+            Console.WriteLine($"\n[Batch {(batchStart / kCommit) + 1}] Root: {currentRoot.ToShortString()} | Disk: {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB | Memory: {Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0:F2} MB");
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"Creation finished in {sw.Elapsed}. Final Root: {currentRoot}");
-        Console.WriteLine($"Disk Usage after Phase 1 (Creation): {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
+        Console.WriteLine($"\nCreation finished in {sw.Elapsed}. Final Root: {currentRoot}");
 
         // Phase 2: Modification
         mModify = Math.Min(mModify, nAccounts);
-        Console.WriteLine($"Phase 2: Randomly modifying slots in {mModify} accounts (k={kCommit})...");
+        Console.WriteLine($"Phase 2: Randomly modifying slots in {mModify} accounts...");
         sw.Restart();
 
         int[] perm = Enumerable.Range(0, nAccounts).OrderBy(x => rand.Next()).ToArray();
@@ -145,19 +150,13 @@ public class MptBench
                     int accountIdx = perm[i];
                     Address addr = addrs[accountIdx];
 
-                    // Modify 500 random slots per account
-                    for (int j = 0; j < 500; j++)
+                    // 每次修改随机 100 个 Slots
+                    for (int j = 0; j < 100; j++)
                     {
-                        int slotIdx = rand.Next(nSlots);
-                        // 重新计算该账号对应的原始唯一 Key
+                        int slotIdx = rand.Next(nSlots); // 尝试修改可能存在的 Slot
                         UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{accountIdx}-slot-{slotIdx}")).Bytes);
                         rand.NextBytes(valBuffer);
                         worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
-                    }
-
-                    if ((i + 1) % 10 == 0 || i + 1 == mModify)
-                    {
-                        Console.Write($"\r...modified {i + 1}/{mModify} accounts ({(double)(i + 1) / mModify * 100:F1}%)");
                     }
                 }
 
@@ -165,42 +164,21 @@ public class MptBench
                 worldState.CommitTree((batchStart / kCommit) + 1000000);
                 currentRoot = worldState.StateRoot;
                 currentHeader = Build.A.BlockHeader.WithStateRoot(currentRoot).TestObject;
-                
                 worldState.Reset();
             }
             
             worldStateManager.FlushCache(CancellationToken.None);
-            
             GC.Collect();
-            long currentSize = GetDirSize(fullPath);
-            Console.WriteLine($"\n[Mod Batch] Committed. State Root: {currentRoot.ToShortString()}. Disk: {(double)currentSize / (1024 * 1024):F2} MB");
+            Console.WriteLine($"\n[Mod Batch] Committed. Disk: {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"Modification finished in {sw.Elapsed}. Final New Root: {currentRoot}");
-
         container.Dispose();
-
-        // Final Report
-        long totalSize = GetDirSize(fullPath);
-        Console.WriteLine("\n--- Final Report ---");
-        Console.WriteLine($"Database Path: {fullPath}");
-        Console.WriteLine($"Disk Usage:    {(double)totalSize / (1024 * 1024):F2} MB");
+        Console.WriteLine($"\n--- Final Report ---\nDisk Usage: {(double)GetDirSize(fullPath) / (1024 * 1024):F2} MB");
     }
 
     private static long GetDirSize(string path)
     {
         if (!Directory.Exists(path)) return 0;
-        try
-        {
-            return Directory.GetFiles(path, "*", SearchOption.AllDirectories)
-                .Select(f => new FileInfo(f))
-                .Sum(f => f.Length);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error calculating directory size: {ex.Message}");
-            return 0;
-        }
+        return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
     }
 }
