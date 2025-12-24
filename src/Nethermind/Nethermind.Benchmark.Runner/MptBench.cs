@@ -186,6 +186,28 @@ public class MptBench
     private static long GetDirSize(string path)
     {
         if (!Directory.Exists(path)) return 0;
-        return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
+        long totalSize = 0;
+        try
+        {
+            string[] files = Directory.GetFiles(path, "*", SearchOption.AllDirectories);
+            foreach (string file in files)
+            {
+                try
+                {
+                    FileInfo fi = new FileInfo(file);
+                    if (fi.Exists)
+                    {
+                        totalSize += fi.Length;
+                    }
+                }
+                catch (FileNotFoundException) { }
+                catch (IOException) { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error calculating directory size: {ex.Message}");
+        }
+        return totalSize;
     }
 }
