@@ -75,6 +75,8 @@ public class MptBench
         Address[] addrs = new Address[nAccounts];
         Hash256 currentRoot = Hash256.Zero;
         BlockHeader currentHeader = IWorldState.PreGenesis;
+        Random rand = new Random(42);
+        byte[] valBuffer = new byte[32];
 
         for (int batchStart = 0; batchStart < nAccounts; batchStart += kCommit)
         {
@@ -93,9 +95,15 @@ public class MptBench
 
                     for (int j = 0; j < nSlots; j++)
                     {
-                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{j}")).Bytes);
-                        byte[] slotVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"value-{j}")).Bytes.ToArray();
-                        worldState.Set(new StorageCell(addr, slotKey), slotVal);
+                        // 确保每个账号的 Key 都是唯一的
+                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{i}-slot-{j}")).Bytes);
+                        rand.NextBytes(valBuffer);
+                        worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
+                    }
+
+                    if ((i + 1) % 10 == 0 || i + 1 == nAccounts)
+                    {
+                        Console.Write($"\r...processed {i + 1}/{nAccounts} accounts ({(double)(i + 1) / nAccounts * 100:F1}%)");
                     }
                 }
 
@@ -108,7 +116,6 @@ public class MptBench
                 worldState.Reset();
             }
 
-            // 强制将 TrieStore 中的脏节点同步到磁盘并清空内存缓存 (关键修复点)
             worldStateManager.FlushCache(CancellationToken.None);
             
             GC.Collect(2, GCCollectionMode.Forced, true);
@@ -125,7 +132,6 @@ public class MptBench
         Console.WriteLine($"Phase 2: Randomly modifying slots in {mModify} accounts (k={kCommit})...");
         sw.Restart();
 
-        Random rand = new Random();
         int[] perm = Enumerable.Range(0, nAccounts).OrderBy(x => rand.Next()).ToArray();
 
         for (int batchStart = 0; batchStart < mModify; batchStart += kCommit)
@@ -136,15 +142,17 @@ public class MptBench
             {
                 for (int i = batchStart; i < batchEnd; i++)
                 {
-                    Address addr = addrs[perm[i]];
+                    int accountIdx = perm[i];
+                    Address addr = addrs[accountIdx];
 
                     // Modify 500 random slots per account
                     for (int j = 0; j < 500; j++)
                     {
                         int slotIdx = rand.Next(nSlots);
-                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"slot-{slotIdx}")).Bytes);
-                        byte[] newVal = Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"new-value-{i}-{j}")).Bytes.ToArray();
-                        worldState.Set(new StorageCell(addr, slotKey), newVal);
+                        // 重新计算该账号对应的原始唯一 Key
+                        UInt256 slotKey = new UInt256(Keccak.Compute(System.Text.Encoding.UTF8.GetBytes($"acc-{accountIdx}-slot-{slotIdx}")).Bytes);
+                        rand.NextBytes(valBuffer);
+                        worldState.Set(new StorageCell(addr, slotKey), valBuffer.ToArray());
                     }
 
                     if ((i + 1) % 10 == 0 || i + 1 == mModify)
@@ -196,4 +204,3 @@ public class MptBench
         }
     }
 }
-
